@@ -11,7 +11,6 @@ from __future__ import annotations
 import re
 from io import BytesIO
 
-import pandas as pd
 import streamlit as st
 
 from converter import (
@@ -103,28 +102,20 @@ box_rows = [
     for c in cartons
     for upc in c.upcs
 ]
-box_df = pd.DataFrame(box_rows)
-# Keep UPC as text in the preview so leading characters are not dropped.
-st.dataframe(
-    box_df.style.format({"UPC": "{}", "Qty": "{:d}", "Box": "{:d}"}),
-    use_container_width=True,
-    height=360,
-)
+st.dataframe(box_rows, use_container_width=True, height=360)
 
 st.subheader("Preview - Weight and Dimensions")
-wd_df = pd.DataFrame(
-    [
-        {
-            "Box Number": int(c.number),
-            "Weight": c.weight,
-            "Length": c.length if c.length is not None else int(length),
-            "Width": c.width if c.width is not None else int(width),
-            "Height": c.height if c.height is not None else int(height),
-        }
-        for c in cartons
-    ]
-)
-st.dataframe(wd_df, use_container_width=True)
+wd_rows = [
+    {
+        "Box Number": int(c.number),
+        "Weight": c.weight,
+        "Length": c.length if c.length is not None else int(length),
+        "Width": c.width if c.width is not None else int(width),
+        "Height": c.height if c.height is not None else int(height),
+    }
+    for c in cartons
+]
+st.dataframe(wd_rows, use_container_width=True)
 
 st.caption(
     "UPC is the 12-digit code (GTIN-14 with the leading digits removed). "
