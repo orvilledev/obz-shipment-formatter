@@ -1,7 +1,7 @@
 # OBZ Shipment Formatter
 
-A small Streamlit app that converts a **packing slip** workbook
-(e.g. `PLOB00123935PL.xlsx`) into the **OBZ Box Contents** workbook with two
+A small Streamlit app that converts a **packing slip** file
+(Excel `.xlsx` / `.xlsm` / `.xls` or `.csv`, e.g. `PLOB00123935PL.xlsx`) into the **OBZ Box Contents** workbook with two
 tabs, matching the reference template exactly.
 
 ## What it does
@@ -39,7 +39,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Then upload a packing slip `.xlsx` and download the generated
+Then upload a packing slip (`.xlsx`, `.xlsm`, `.xls`, or `.csv`) and download the generated
 `... Box Contents.xlsx`.
 
 ## Files

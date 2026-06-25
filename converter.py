@@ -26,12 +26,16 @@ default to standard values (configurable in the app).
 
 from __future__ import annotations
 
+import csv
 import re
 from dataclasses import dataclass, field
-from io import BytesIO
+from io import BytesIO, StringIO
+from pathlib import Path
 
 import openpyxl
 from openpyxl.styles import Font
+
+SUPPORTED_EXTENSIONS = {".xlsx", ".xlsm", ".xls", ".csv"}
 
 # Column indices (1-based) inside the packing slip ----------------------------
 COL_LABEL = 2     # B - "Carton" / "PO"
@@ -103,28 +107,183 @@ def _as_number(value):
     return int(num) if num.is_integer() else num
 
 
-def parse_packing_slip(source) -> list[Carton]:
-    """Parse the packing slip workbook into an ordered list of Cartons.
+@dataclass
+class CellGrid:
+    """Row/column grid with 1-based indexing, like an Excel worksheet."""
 
-    `source` may be a path or a file-like object (BytesIO from an upload).
-    """
-    wb = openpyxl.load_workbook(source, data_only=True)
-    ws = wb.active
+    _rows: list[list]
 
+    @property
+    def max_row(self) -> int:
+        return len(self._rows)
+
+    @property
+    def max_column(self) -> int:
+        return max((len(row) for row in self._rows), default=0)
+
+    def cell_value(self, row: int, column: int):
+        if row < 1 or column < 1:
+            return None
+        row_values = self._rows[row - 1]
+        if column > len(row_values):
+            return None
+        value = row_values[column - 1]
+        if value == "":
+            return None
+        return value
+
+
+def _normalize_extension(filename: str | None) -> str:
+    if not filename:
+        return ".xlsx"
+    return Path(filename).suffix.lower()
+
+
+def _read_bytes(source) -> bytes:
+    if isinstance(source, (bytes, bytearray)):
+        return bytes(source)
+    if hasattr(source, "read"):
+        data = source.read()
+        if hasattr(source, "seek"):
+            source.seek(0)
+        return data
+    return Path(source).read_bytes()
+
+
+def _grid_from_openpyxl(ws) -> CellGrid:
+    rows: list[list] = []
+    for row in ws.iter_rows(values_only=True):
+        rows.append(list(row))
+    return CellGrid(rows)
+
+
+def _grid_from_xls(data: bytes) -> CellGrid:
+    import xlrd
+
+    book = xlrd.open_workbook(file_contents=data)
+    sheet = book.sheet_by_index(0)
+    rows: list[list] = []
+    for r in range(sheet.nrows):
+        row_values = []
+        for c in range(sheet.ncols):
+            cell = sheet.cell(r, c)
+            if cell.ctype == xlrd.XL_CELL_EMPTY:
+                row_values.append(None)
+            elif cell.ctype == xlrd.XL_CELL_NUMBER:
+                value = cell.value
+                row_values.append(int(value) if value == int(value) else value)
+            else:
+                row_values.append(cell.value)
+        rows.append(row_values)
+    return CellGrid(rows)
+
+
+def _grid_from_csv(data: bytes) -> CellGrid:
+    text = None
+    for encoding in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = data.decode("utf-8", errors="replace")
+
+    rows: list[list] = []
+    for row in csv.reader(StringIO(text)):
+        rows.append(row)
+    return CellGrid(rows)
+
+
+def load_cell_grid(source, filename: str | None = None) -> CellGrid:
+    """Load a packing slip from Excel (.xlsx/.xlsm/.xls) or CSV into a grid."""
+    ext = _normalize_extension(filename)
+    if ext not in SUPPORTED_EXTENSIONS:
+        supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+        raise ValueError(f"Unsupported file type '{ext}'. Use one of: {supported}")
+
+    data = _read_bytes(source)
+
+    if ext == ".csv":
+        return _grid_from_csv(data)
+    if ext == ".xls":
+        return _grid_from_xls(data)
+
+    wb = openpyxl.load_workbook(BytesIO(data), data_only=True)
+    return _grid_from_openpyxl(wb.active)
+
+
+def _scan_carton_fields(grid: CellGrid, row: int):
+    """Read carton number, weight, and PIN dimensions from a header row."""
+    carton_no = _as_number(grid.cell_value(row, COL_CARTON_NO))
+    weight = _as_number(grid.cell_value(row, COL_WEIGHT))
+    length, width, height = parse_dimensions(grid.cell_value(row, COL_PIN))
+
+    row_values = [
+        grid.cell_value(row, col)
+        for col in range(1, grid.max_column + 1)
+    ]
+
+    if length is None:
+        for value in row_values:
+            if value and re.search(r"\d+[xX\u00d7*]\d+", str(value)):
+                length, width, height = parse_dimensions(value)
+                break
+
+    if weight is None:
+        for idx, value in enumerate(row_values):
+            if value and "weight" in str(value).lower():
+                for later in row_values[idx + 1 :]:
+                    parsed = _as_number(later)
+                    if parsed is not None:
+                        weight = parsed
+                        break
+                break
+
+    if carton_no is None:
+        seen_carton = False
+        for value in row_values:
+            if value is None:
+                continue
+            text = str(value).strip().lower()
+            if text == "carton":
+                seen_carton = True
+                continue
+            if seen_carton:
+                parsed = _as_number(value)
+                if parsed is not None:
+                    carton_no = parsed
+                    break
+
+    return carton_no, weight, length, width, height
+
+
+def _detect_upc_column(grid: CellGrid, row: int) -> int | None:
+    for col in range(1, grid.max_column + 1):
+        value = grid.cell_value(row, col)
+        if value and "upc" in str(value).lower():
+            return col
+    return None
+
+
+def parse_packing_slip_grid(grid: CellGrid) -> list[Carton]:
+    """Parse a cell grid into an ordered list of Cartons."""
     cartons: list[Carton] = []
     current: Carton | None = None
+    col_upc = COL_UPC
 
-    for row in range(1, ws.max_row + 1):
-        label = ws.cell(row=row, column=COL_LABEL).value
+    for row in range(1, grid.max_row + 1):
+        label = grid.cell_value(row, COL_LABEL)
         label_str = str(label).strip().lower() if label is not None else ""
 
-        # New carton block.
+        if label_str == "po":
+            detected = _detect_upc_column(grid, row)
+            if detected is not None:
+                col_upc = detected
+            continue
+
         if label_str == "carton":
-            carton_no = _as_number(ws.cell(row=row, column=COL_CARTON_NO).value)
-            weight = _as_number(ws.cell(row=row, column=COL_WEIGHT).value)
-            length, width, height = parse_dimensions(
-                ws.cell(row=row, column=COL_PIN).value
-            )
+            carton_no, weight, length, width, height = _scan_carton_fields(grid, row)
             current = Carton(
                 number=int(carton_no) if carton_no is not None else len(cartons) + 1,
                 weight=weight,
@@ -135,13 +294,22 @@ def parse_packing_slip(source) -> list[Carton]:
             cartons.append(current)
             continue
 
-        # Item row: a UPC/GTIN that is a real code (not the "UPC/GTIN" header).
-        raw_upc = ws.cell(row=row, column=COL_UPC).value
+        raw_upc = grid.cell_value(row, col_upc)
         digits = _clean_digits(raw_upc)
         if current is not None and len(digits) >= 12:
             current.upcs.append(gtin_to_upc(raw_upc))
 
     return cartons
+
+
+def parse_packing_slip(source, filename: str | None = None) -> list[Carton]:
+    """Parse the packing slip workbook into an ordered list of Cartons.
+
+    `source` may be a path, bytes, or file-like object (e.g. Streamlit upload).
+    `filename` is used to detect the file type (.xlsx, .xls, .xlsm, .csv).
+    """
+    grid = load_cell_grid(source, filename)
+    return parse_packing_slip_grid(grid)
 
 
 def build_box_contents_workbook(
@@ -214,11 +382,12 @@ def build_box_contents_workbook(
 
 def convert(
     source,
+    filename: str | None = None,
     length: int = DEFAULT_LENGTH,
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
 ) -> tuple[openpyxl.Workbook, list[Carton]]:
-    cartons = parse_packing_slip(source)
+    cartons = parse_packing_slip(source, filename=filename)
     wb = build_box_contents_workbook(cartons, length, width, height)
     return wb, cartons
 

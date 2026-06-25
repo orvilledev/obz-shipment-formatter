@@ -9,7 +9,6 @@ tabs, matching the reference template.
 from __future__ import annotations
 
 import re
-from io import BytesIO
 
 import streamlit as st
 
@@ -41,13 +40,16 @@ with st.sidebar:
     height = st.number_input("Height", min_value=0, value=DEFAULT_HEIGHT, step=1)
 
 uploaded = st.file_uploader(
-    "Upload the packing slip (.xlsx)", type=["xlsx"], accept_multiple_files=False
+    "Upload the packing slip",
+    type=["xlsx", "xlsm", "xls", "csv"],
+    accept_multiple_files=False,
+    help="Supported formats: Excel (.xlsx, .xlsm, .xls) and CSV (.csv).",
 )
 
 
 def _default_output_name(input_name: str) -> str:
     """PLOB00123935PL.xlsx -> PLOB00123935 Box Contents.xlsx (best effort)."""
-    stem = re.sub(r"\.xlsx$", "", input_name, flags=re.IGNORECASE)
+    stem = re.sub(r"\.[^.]+$", "", input_name, flags=re.IGNORECASE)
     stem = re.sub(r"PL$", "", stem).strip()
     base = stem if stem else "OBZ"
     return f"{base} Box Contents.xlsx"
@@ -59,9 +61,9 @@ if uploaded is None:
 
 try:
     file_bytes = uploaded.getvalue()
-    cartons = parse_packing_slip(BytesIO(file_bytes))
+    cartons = parse_packing_slip(file_bytes, filename=uploaded.name)
 except Exception as exc:  # noqa: BLE001
-    st.error(f"Could not read that workbook: {exc}")
+    st.error(f"Could not read that file: {exc}")
     st.stop()
 
 if not cartons:
