@@ -21,7 +21,8 @@ Key transformations:
 
 - **UPC** – the 14-digit GTIN (`00840127879390`) is reduced to the 12-digit
   UPC-A (`840127879390`) by keeping the trailing 12 digits.
-- **Qty** – one line per scanned item, quantity `1`.
+- **Qty** – read from the packing slip **Qty** column (not assumed to be 1).
+  When a line has Qty `2`, the output row keeps Qty as `2`.
 - **Box** – the carton number the item belongs to.
 - **Weight** – taken from each carton header.
 - **Length / Width / Height** – read from each carton's **`PIN:`** field

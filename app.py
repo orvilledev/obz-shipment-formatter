@@ -73,11 +73,12 @@ if not cartons:
     )
     st.stop()
 
-total_items = sum(len(c.upcs) for c in cartons)
+total_items = sum(c.total_qty for c in cartons)
+total_lines = sum(len(c.items) for c in cartons)
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Boxes / Cartons", len(cartons))
-c2.metric("Total items (Qty)", total_items)
+c2.metric("Total Qty", total_items)
 total_weight = sum((c.weight or 0) for c in cartons)
 c3.metric("Total weight", round(total_weight, 2))
 
@@ -86,7 +87,8 @@ wb = build_box_contents_workbook(cartons, int(length), int(width), int(height))
 output_bytes = workbook_to_bytes(wb)
 
 st.success(
-    f"Generated workbook with {total_items} items across {len(cartons)} boxes."
+    f"Generated workbook with {total_items} units "
+    f"({total_lines} line items) across {len(cartons)} boxes."
 )
 
 st.download_button(
@@ -100,9 +102,9 @@ st.download_button(
 # --- Previews -----------------------------------------------------------------
 st.subheader("Preview - Box Contents")
 box_rows = [
-    {"UPC": upc, "Qty": 1, "Box": int(c.number)}
+    {"UPC": item.upc, "Qty": int(item.qty), "Box": int(c.number)}
     for c in cartons
-    for upc in c.upcs
+    for item in c.items
 ]
 st.dataframe(box_rows, use_container_width=True, height=360)
 
@@ -121,5 +123,6 @@ st.dataframe(wd_rows, use_container_width=True)
 
 st.caption(
     "UPC is the 12-digit code (GTIN-14 with the leading digits removed). "
-    "Qty, Box, Weight and dimensions are written as real numbers, not text."
+    "Qty is read from the packing slip Qty column (not assumed to be 1). "
+    "Box, Weight and dimensions are written as real numbers, not text."
 )

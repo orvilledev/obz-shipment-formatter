@@ -19,9 +19,9 @@ followed (two rows down) by a sub-header row:
 and then one row per item, where column W holds the 14-digit GTIN.
 
 The output strips the GTIN-14 down to the 12-digit UPC (the trailing 12 digits),
-emits one line per scanned item with Qty = 1, and records the carton weight on
-the second sheet. Box dimensions are not present in the packing slip, so they
-default to standard values (configurable in the app).
+emits one line per packing-slip item with the real Qty from column AW, and records
+the carton weight on the second sheet. Box dimensions come from each carton's
+PIN field when present, otherwise from configurable defaults.
 """
 
 from __future__ import annotations
@@ -42,11 +42,18 @@ COL_LABEL = 2     # B - "Carton" / "PO"
 COL_CARTON_NO = 6  # F - carton number on the header row
 COL_WEIGHT = 20   # T - carton weight on the header row
 COL_UPC = 23      # W - UPC/GTIN on the item rows
+COL_QTY = 49      # AW - Qty on the item rows
 COL_PIN = 46      # AT - "PIN:" box dimensions (e.g. "24x20x16") on the header row
 
 DEFAULT_LENGTH = 24
 DEFAULT_WIDTH = 20
 DEFAULT_HEIGHT = 16
+
+
+@dataclass
+class LineItem:
+    upc: str
+    qty: int
 
 
 @dataclass
@@ -56,7 +63,16 @@ class Carton:
     length: float | int | None = None
     width: float | int | None = None
     height: float | int | None = None
-    upcs: list[str] = field(default_factory=list)
+    items: list[LineItem] = field(default_factory=list)
+
+    @property
+    def upcs(self) -> list[str]:
+        """Back-compat helper: list of UPC codes only."""
+        return [item.upc for item in self.items]
+
+    @property
+    def total_qty(self) -> int:
+        return sum(item.qty for item in self.items)
 
 
 def _clean_digits(value) -> str:
@@ -258,10 +274,15 @@ def _scan_carton_fields(grid: CellGrid, row: int):
     return carton_no, weight, length, width, height
 
 
-def _detect_upc_column(grid: CellGrid, row: int) -> int | None:
+def _detect_header_column(grid: CellGrid, row: int, *names: str) -> int | None:
+    """Find a column whose header cell contains any of the given names."""
+    targets = [n.lower() for n in names]
     for col in range(1, grid.max_column + 1):
         value = grid.cell_value(row, col)
-        if value and "upc" in str(value).lower():
+        if value is None:
+            continue
+        text = str(value).strip().lower()
+        if any(t == text or t in text for t in targets):
             return col
     return None
 
@@ -271,15 +292,19 @@ def parse_packing_slip_grid(grid: CellGrid) -> list[Carton]:
     cartons: list[Carton] = []
     current: Carton | None = None
     col_upc = COL_UPC
+    col_qty = COL_QTY
 
     for row in range(1, grid.max_row + 1):
         label = grid.cell_value(row, COL_LABEL)
         label_str = str(label).strip().lower() if label is not None else ""
 
         if label_str == "po":
-            detected = _detect_upc_column(grid, row)
-            if detected is not None:
-                col_upc = detected
+            detected_upc = _detect_header_column(grid, row, "upc", "upc/gtin", "gtin")
+            if detected_upc is not None:
+                col_upc = detected_upc
+            detected_qty = _detect_header_column(grid, row, "qty", "quantity")
+            if detected_qty is not None:
+                col_qty = detected_qty
             continue
 
         if label_str == "carton":
@@ -297,7 +322,9 @@ def parse_packing_slip_grid(grid: CellGrid) -> list[Carton]:
         raw_upc = grid.cell_value(row, col_upc)
         digits = _clean_digits(raw_upc)
         if current is not None and len(digits) >= 12:
-            current.upcs.append(gtin_to_upc(raw_upc))
+            qty_val = _as_number(grid.cell_value(row, col_qty))
+            qty = int(qty_val) if qty_val is not None and qty_val > 0 else 1
+            current.items.append(LineItem(upc=gtin_to_upc(raw_upc), qty=qty))
 
     return cartons
 
@@ -337,12 +364,12 @@ def build_box_contents_workbook(
 
     row = 2
     for carton in cartons:
-        for upc in carton.upcs:
-            a = ws1.cell(row=row, column=1, value=upc)   # UPC kept as exact code
+        for item in carton.items:
+            a = ws1.cell(row=row, column=1, value=item.upc)  # UPC kept as exact code
             a.number_format = "0.00"
             a.font = normal
 
-            b = ws1.cell(row=row, column=2, value=1)     # Qty (real integer)
+            b = ws1.cell(row=row, column=2, value=int(item.qty))  # Qty (real integer)
             b.number_format = "0"
             b.font = normal
 
