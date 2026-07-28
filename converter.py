@@ -13,8 +13,9 @@ Carton blocks on the slip look like:
 
 followed by item rows with UPC/GTIN and Qty.
 
-Length / Width / Height are read only from each carton's PIN field on the
-uploaded packing slip — never forced to static defaults.
+Length / Width / Height come from each carton's PIN field when filled, otherwise
+from the matching DIMS workbook (Carton / Length / Width / Height). Many FBA
+packing slips leave PIN blank — for those, upload the companion DIMS file.
 """
 
 from __future__ import annotations
@@ -67,6 +68,19 @@ class Carton:
     @property
     def total_qty(self) -> int:
         return sum(item.qty for item in self.items)
+
+
+@dataclass
+class DimsRecord:
+    """One carton row from a DIMS workbook."""
+
+    carton: int | None = None
+    license_plate: str | None = None
+    length: float | int | None = None
+    width: float | int | None = None
+    height: float | int | None = None
+    weight: float | int | None = None
+    units: int | None = None
 
 
 def _clean_digits(value) -> str:
@@ -477,12 +491,112 @@ def parse_packing_slip(source, filename: str | None = None) -> list[Carton]:
     return parse_packing_slip_grid(grid)
 
 
-def build_box_contents_workbook(cartons: list[Carton]) -> openpyxl.Workbook:
-    """Create the OBZ Box Contents workbook matching the reference template.
+def _find_header_row(
+    grid: CellGrid, required: set[str], scan_rows: int = 15
+) -> tuple[int, dict[str, int]] | None:
+    """Locate a header row containing the required column names."""
+    required_norm = {name.lower() for name in required}
+    for row in range(1, min(grid.max_row, scan_rows) + 1):
+        mapping: dict[str, int] = {}
+        for col in range(1, grid.max_column + 1):
+            value = grid.cell_value(row, col)
+            if value is None:
+                continue
+            key = str(value).strip().lower()
+            if key:
+                mapping[key] = col
+        if required_norm.issubset(mapping.keys()):
+            return row, mapping
+    return None
 
-    Length / Width / Height are taken only from each carton (PIN on the slip).
-    Missing dimensions are left blank — never filled with static defaults.
+
+def parse_dims_file(source, filename: str | None = None) -> list[DimsRecord]:
+    """Parse a DIMS workbook (Length / Width / Height / Weight per carton)."""
+    grid = load_cell_grid(source, filename)
+    found = _find_header_row(grid, {"carton", "length", "width", "height"})
+    if found is None:
+        raise ValueError(
+            "Could not find a DIMS header row with Carton / Length / Width / Height."
+        )
+
+    header_row, cols = found
+    col_carton = cols["carton"]
+    col_length = cols["length"]
+    col_width = cols["width"]
+    col_height = cols["height"]
+    col_license = cols.get("license plate")
+    col_weight = cols.get("weight")
+    col_units = cols.get("units")
+
+    records: list[DimsRecord] = []
+    for row in range(header_row + 1, grid.max_row + 1):
+        carton_no = _as_number(grid.cell_value(row, col_carton))
+        length = _as_number(grid.cell_value(row, col_length))
+        width = _as_number(grid.cell_value(row, col_width))
+        height = _as_number(grid.cell_value(row, col_height))
+        if carton_no is None:
+            continue
+
+        license_plate = None
+        if col_license is not None:
+            raw = grid.cell_value(row, col_license)
+            if raw is not None:
+                license_plate = str(raw).strip() or None
+
+        weight = _as_number(grid.cell_value(row, col_weight)) if col_weight else None
+        units_val = _as_number(grid.cell_value(row, col_units)) if col_units else None
+        units = int(units_val) if units_val is not None else None
+
+        records.append(
+            DimsRecord(
+                carton=int(carton_no),
+                license_plate=license_plate,
+                length=length,
+                width=width,
+                height=height,
+                weight=weight,
+                units=units,
+            )
+        )
+    return records
+
+
+def apply_dims_to_cartons(cartons: list[Carton], dims: list[DimsRecord]) -> int:
+    """Merge DIMS L/W/H onto cartons. Match by license plate, then carton number.
+
+    Only fills dimensions that are still missing (PIN takes priority).
+    Returns the number of cartons that received at least one dimension.
     """
+    by_license = {d.license_plate: d for d in dims if d.license_plate}
+    by_number = {d.carton: d for d in dims if d.carton is not None}
+
+    updated = 0
+    for carton in cartons:
+        match = None
+        if carton.license_plate and carton.license_plate in by_license:
+            match = by_license[carton.license_plate]
+        elif carton.number in by_number:
+            match = by_number[carton.number]
+        if match is None:
+            continue
+
+        changed = False
+        if carton.length is None and match.length is not None:
+            carton.length = match.length
+            changed = True
+        if carton.width is None and match.width is not None:
+            carton.width = match.width
+            changed = True
+        if carton.height is None and match.height is not None:
+            carton.height = match.height
+            changed = True
+        if changed:
+            updated += 1
+    return updated
+
+
+def build_box_contents_workbook(cartons: list[Carton]) -> openpyxl.Workbook:
+    """Create the OBZ Box Contents workbook matching the reference template."""
     wb = openpyxl.Workbook()
 
     ws1 = wb.active
@@ -537,8 +651,16 @@ def build_box_contents_workbook(cartons: list[Carton]) -> openpyxl.Workbook:
     return wb
 
 
-def convert(source, filename: str | None = None) -> tuple[openpyxl.Workbook, list[Carton]]:
+def convert(
+    source,
+    filename: str | None = None,
+    dims_source=None,
+    dims_filename: str | None = None,
+) -> tuple[openpyxl.Workbook, list[Carton]]:
     cartons = parse_packing_slip(source, filename=filename)
+    if dims_source is not None:
+        dims = parse_dims_file(dims_source, filename=dims_filename)
+        apply_dims_to_cartons(cartons, dims)
     wb = build_box_contents_workbook(cartons)
     return wb, cartons
 

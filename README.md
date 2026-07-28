@@ -24,9 +24,10 @@ Key transformations:
 - **Qty** – read from the packing slip **Qty** column (not assumed to be 1).
 - **Box** – the carton number the item belongs to.
 - **Weight** – taken from each carton header.
-- **Length / Width / Height** – read from each carton's **`PIN:`** field on the
-  uploaded packing slip (e.g. `24x20x16`). Missing PIN values are left blank —
-  they are never filled with static defaults.
+- **Length / Width / Height** – from each carton's **`PIN:`** field when filled
+  (e.g. `24x20x16`). FBA packing slips often leave PIN blank — for those, also
+  upload the matching **DIMS** file (`DIMS FBA….xlsx`), which has the real
+  Length / Width / Height per carton.
 
 All of `Qty`, `Box`, `Weight`, and the dimensions are written as **real numbers**
 (int/float), never as text. The `UPC` is kept as the exact code string so no
@@ -39,8 +40,9 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Then upload a packing slip (`.xlsx`, `.xlsm`, `.xls`, `.csv`, or `.pdf`) and
-download the generated `... Box Contents.xlsx`.
+Then upload a packing slip (`.xlsx`, `.xlsm`, `.xls`, `.csv`, or `.pdf`).
+For FBA slips, also upload the matching **DIMS** file so Length / Width / Height
+are filled. Download the generated `... Box Contents.xlsx`.
 
 ## Files
 
