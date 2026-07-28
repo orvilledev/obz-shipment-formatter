@@ -1,9 +1,9 @@
 """
 OBZ Shipment Formatter - Streamlit app.
 
-Upload a packing slip (e.g. PLOB00123935PL.xlsx) and download a formatted
-"OBZ Box Contents" workbook with the "Box Contents" and "Weight and Dimensions"
-tabs, matching the reference template.
+Upload a packing slip (and optionally a DIMS file for accurate box dimensions)
+and download a formatted "OBZ Box Contents" workbook with the
+"Box Contents" and "Weight and Dimensions" tabs.
 """
 
 from __future__ import annotations
@@ -16,7 +16,9 @@ from converter import (
     DEFAULT_HEIGHT,
     DEFAULT_LENGTH,
     DEFAULT_WIDTH,
+    apply_dims_to_cartons,
     build_box_contents_workbook,
+    parse_dims_file,
     parse_packing_slip,
     workbook_to_bytes,
 )
@@ -32,8 +34,8 @@ st.caption(
 with st.sidebar:
     st.header("Fallback box dimensions")
     st.write(
-        "Dimensions are read from each carton's **PIN:** field (e.g. `24x20x16`). "
-        "These values are only used for cartons where that field is missing."
+        "Used only when a carton has no dimensions from a **DIMS** file "
+        "or from the packing slip **PIN:** field."
     )
     length = st.number_input("Length", min_value=0, value=DEFAULT_LENGTH, step=1)
     width = st.number_input("Width", min_value=0, value=DEFAULT_WIDTH, step=1)
@@ -46,24 +48,35 @@ uploaded = st.file_uploader(
     help="Supported formats: Excel (.xlsx, .xlsm, .xls) and CSV (.csv).",
 )
 
+dims_uploaded = st.file_uploader(
+    "Upload the DIMS file (optional, for accurate L × W × H)",
+    type=["xlsx", "xlsm", "xls", "csv"],
+    accept_multiple_files=False,
+    help=(
+        "Companion 'DIMS …' workbook with Carton / Length / Width / Height columns. "
+        "Required for accurate dimensions when the packing slip PIN field is empty."
+    ),
+)
+
 
 def _default_output_name(input_name: str) -> str:
     """PLOB00123935PL.xlsx -> PLOB00123935 Box Contents.xlsx (best effort)."""
     stem = re.sub(r"\.[^.]+$", "", input_name, flags=re.IGNORECASE)
+    stem = re.sub(r"(PackingSlip(By)?\s*)", "", stem, flags=re.IGNORECASE).strip()
     stem = re.sub(r"PL$", "", stem).strip()
     base = stem if stem else "OBZ"
     return f"{base} Box Contents.xlsx"
 
 
 if uploaded is None:
-    st.info("Upload a packing slip workbook to get started.")
+    st.info("Upload a packing slip workbook to get started. Add the matching DIMS file for accurate box dimensions.")
     st.stop()
 
 try:
     file_bytes = uploaded.getvalue()
     cartons = parse_packing_slip(file_bytes, filename=uploaded.name)
 except Exception as exc:  # noqa: BLE001
-    st.error(f"Could not read that file: {exc}")
+    st.error(f"Could not read that packing slip: {exc}")
     st.stop()
 
 if not cartons:
@@ -73,14 +86,41 @@ if not cartons:
     )
     st.stop()
 
+dims_matched = 0
+if dims_uploaded is not None:
+    try:
+        dims = parse_dims_file(dims_uploaded.getvalue(), filename=dims_uploaded.name)
+        dims_matched = apply_dims_to_cartons(cartons, dims)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not read that DIMS file: {exc}")
+        st.stop()
+
 total_items = sum(c.total_qty for c in cartons)
 total_lines = sum(len(c.items) for c in cartons)
+missing_dims = sum(
+    1 for c in cartons if c.length is None or c.width is None or c.height is None
+)
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Boxes / Cartons", len(cartons))
 c2.metric("Total Qty", total_items)
 total_weight = sum((c.weight or 0) for c in cartons)
 c3.metric("Total weight", round(total_weight, 2))
+c4.metric("DIMS matched", dims_matched if dims_uploaded else "—")
+
+if dims_uploaded is None and missing_dims:
+    st.warning(
+        f"{missing_dims} carton(s) have no PIN dimensions. "
+        "Upload the matching **DIMS** file for accurate Length / Width / Height "
+        "(otherwise sidebar fallbacks are used)."
+    )
+elif dims_uploaded is not None and dims_matched < len(cartons):
+    st.warning(
+        f"DIMS matched {dims_matched} of {len(cartons)} cartons. "
+        "Unmatched cartons will use PIN values or sidebar fallbacks."
+    )
+elif dims_uploaded is not None:
+    st.success(f"Applied dimensions from DIMS to all {dims_matched} cartons.")
 
 # Build the workbook.
 wb = build_box_contents_workbook(cartons, int(length), int(width), int(height))
@@ -116,6 +156,11 @@ wd_rows = [
         "Length": c.length if c.length is not None else int(length),
         "Width": c.width if c.width is not None else int(width),
         "Height": c.height if c.height is not None else int(height),
+        "Source": (
+            "DIMS/PIN"
+            if c.length is not None and c.width is not None and c.height is not None
+            else "Fallback"
+        ),
     }
     for c in cartons
 ]
@@ -123,6 +168,7 @@ st.dataframe(wd_rows, use_container_width=True)
 
 st.caption(
     "UPC is the 12-digit code (GTIN-14 with the leading digits removed). "
-    "Qty is read from the packing slip Qty column (not assumed to be 1). "
-    "Box, Weight and dimensions are written as real numbers, not text."
+    "Qty is read from the packing slip Qty column. "
+    "Length / Width / Height prefer the DIMS file, then PIN, then sidebar fallbacks. "
+    "Numbers are written as real numbers, not text."
 )
